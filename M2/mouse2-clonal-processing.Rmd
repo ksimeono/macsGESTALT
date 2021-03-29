@@ -1,0 +1,1165 @@
+---
+title: 'Mouse2: lineage reconstruction'
+output: html_notebook
+---
+
+Tested using R version 4.0.2, sessionInfo at the bottom
+
+Output files generated throughout this workbook:  
+* `precluster_filtered.txt` is a large file containing all aligned data remaining after the organizational and QC steps of the "Section 1" portion  
+* `final_classifications.txt` concisely stores cell type (i.e. singlet, doublet, unmatched etc) and cloneID if matched singlet  
+* `final_singlets.txt` is a large file containing all info from alignment pipeline for final remaining singlets after all steps  
+    - this includes all aligned transcripts as individual rows and full barcode sequences  
+* `final_editing_data.txt` is used for phylogeny building scripts downstream  
+
+\
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+setRepositories(ind = 1:2)
+library(tidyverse, warn = FALSE)
+library(RColorBrewer)
+library(cowplot)
+theme_set(theme_cowplot())
+library(scales)
+library(corrplot)
+library(forcats)
+library(gridExtra)
+library(textshape)
+```
+
+
+### Section 1: Filter aligned barcode sequence data to find real cells and static barcodes
+
+#### Provide input files and perform intial parsing, cleanup, and filtering  
+1) Provide barcode aligned files for each sample (files ending in .stats)   
+2) Provide a 10x barcode (i.e. cellID) whitelist  
+    - can be from Seurat or Monocle transcriptional workflow or simply 10x's v3 cellranger 3' mRNA whitelist  
+    - we use our own Seurat whitelist, as we're only interested in cells with corresponding single cell transcriptional data  
+3) Provide a project name, used for naming output files 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+###### Project name for naming output files ######
+project_name = 'pdac_mouse2'
+
+### barcode alignment .stats files for each sample 
+PT_stats_file = 'input-files/PT.stats'
+Met_stats_file = 'input-files/Met.stats'
+Liver_stats_file = 'input-files/Liver.stats'
+Lung_stats_file = 'input-files/Lung.stats'
+
+### whitelist to check 10x IDs against, either a 10x master list or simply 10x cellIDs from your Seurat or Monocle transcriptional workflow
+### we check against Seurat filtered 10x cellIDs here, as we're only interested in cells with corresponding single cell transcriptional data
+whitelist_file = 'input-files/whitelist_cancer_cells.txt'
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+### Read in barcodes stats files
+PT_stats_df = read.table(file = PT_stats_file, sep = '\t', header = TRUE, fill = TRUE) %>% mutate(sample = 'PT')
+Met_stats_df = read.table(file = Met_stats_file, sep = '\t', header = TRUE, fill = TRUE) %>% mutate(sample = 'Met')
+Liver_stats_df = read.table(file = Liver_stats_file, sep = '\t', header = TRUE, fill = TRUE) %>% mutate(sample = 'Liver')
+Lung_stats_df = read.table(file = Lung_stats_file, sep = '\t', header = TRUE, fill = TRUE) %>% mutate(sample = 'Lung')
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+### Bind barcode alignments stats files and dataframe cleanup
+
+stats_df = do.call("rbind", list(PT_stats_df, 
+                                 Met_stats_df, 
+                                 Liver_stats_df, 
+                                 Lung_stats_df)) %>%
+  select(-read1len, -read2len, -finalReadCount1, 
+         -finalReadCount2, -matchRate2, -alignedBases2, 
+         -fwdRead, -revRead, -fwdReadRef, -revReadRef) %>%
+  select(-keep:-merged) %>%
+  separate(col = readName, into = c('runInfo', 'cellandUMI', 'usedReads', 'totalReads'), sep = '_') %>%
+  mutate(cellandUMI = str_sub(cellandUMI, end = -4)) %>%
+  mutate(cellID = str_sub(cellandUMI, start = 1, end = 16)) %>%
+  mutate(UMI = str_sub(cellandUMI, start = 17, end =28)) %>%
+  ### add sample prefix to cellID to account for repeat cell identifiers (without having to always do distinct(cellID, sample) - now you can just do cellID)
+  rename(cell = cellID) %>% unite('cellID', c('sample', 'cell'), remove = FALSE) %>% select(-cell) %>%
+  ### keep only distinct barcode transcripts
+  distinct(cellID, UMI, .keep_all = TRUE)
+
+```
+\
+
+
+#### Initiate a summary table to append info on during each filtration step
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+summary_df = data.frame(Step = numeric(0), 
+                        Cells = numeric(0),
+                        IntIDs = numeric(0),
+                        Cell_IntID_Combos = numeric(0),
+                        Cell_UMI_Combos = numeric(0),
+                        Reads = numeric(0),
+                        Clusters = numeric(0))
+
+summary_df[nrow(summary_df)+1, ] = c('Aligned to CRISPR barcode', 
+                                     NA, 
+                                     NA, 
+                                     NA, 
+                                     stats_df %>% nrow(), 
+                                     sum(as.numeric(stats_df$totalReads)),
+                                     NA)
+
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Read in v3 cellranger 3' mRNA whitelist and filter out cellID's that aren't a perfect match to the whitelist
+
+whitelist = read_table(whitelist_file) %>%
+  mutate(cellID = str_trim(cellID, side = 'both')) %>%
+  filter(str_detect(cellID, '^M2_')) %>%
+  mutate(cellID = str_replace(cellID, '^M2_', ''))
+
+whiteStats_df = stats_df %>%
+  mutate(on_whitelist = ifelse(cellID %in% whitelist$cellID, TRUE, FALSE)) %>%
+  filter(on_whitelist == TRUE)
+
+
+step_name = 'Present in thresholded transcriptome data'
+add = 1
+add = ifelse(last(summary_df$Step) == step_name, 0, 1)
+summary_df[nrow(summary_df)+add, ] = c(step_name,
+                                     whiteStats_df %>% distinct(cellID) %>% nrow(),
+                                     NA,
+                                     NA,
+                                     whiteStats_df %>% nrow(),
+                                     sum(as.numeric(whiteStats_df$totalReads)),
+                                     NA)
+```
+
+
+```{r echo = FALSE, message=FALSE, warning=FALSE, rows.print = 30}
+# Find location of intID in mergedReadRef, find the intID in the mergedRead, and remove intIDs with missing bases
+
+whiteStats_df = whiteStats_df %>%
+  mutate(intID_pos = regexpr("NNNNNNNNNN", whiteStats_df$mergedReadRef))
+
+whiteStats_df = whiteStats_df %>%
+  mutate(intID = str_sub(whiteStats_df$mergedRead, 
+                         start = whiteStats_df$intID_pos, 
+                         end = whiteStats_df$intID_pos + 9))
+
+fullIntIDs_df = whiteStats_df %>%
+  ##### remove intIDs with missing bases
+  filter(!grepl('-', intID))
+
+
+step_name = 'Remove incomplete intIDs'
+add = 1
+add = ifelse(last(summary_df$Step) == step_name, 0, 1)
+summary_df[nrow(summary_df)+add, ] = c(step_name, 
+                                     fullIntIDs_df %>% distinct(cellID, sample) %>% nrow(), 
+                                     fullIntIDs_df %>% distinct(intID) %>% nrow(), 
+                                     fullIntIDs_df %>% distinct(cellID, sample, intID) %>% nrow(), 
+                                     fullIntIDs_df %>% nrow(), 
+                                     sum(as.numeric(fullIntIDs_df$totalReads)),
+                                     NA)
+
+summary_df %>% print()
+```
+\
+\
+
+
+
+#### Remove cell + static barcode (Cell-IntID) combos that fall below a transcript (UMI) threshold  
+* This removes combos that are probably PCR errors or that are ambient background in an otherwise cell-containing droplet  
+```{r fig.height=1.5, fig.width=1.8, echo=FALSE, message=FALSE, warning=FALSE, dpi=50, rows.print = 30}
+
+cell_filt_df = fullIntIDs_df %>%
+  add_count(cellID, intID) %>% rename(UMIs_per_intID_per_Cell = n) #IMPORTANT: this counts should not change that as we filter data
+
+
+combo_UMI_cutoff = 2
+
+intIDs_per_Cell_rank_df = cell_filt_df %>%
+  ungroup() %>%
+  arrange(-UMIs_per_intID_per_Cell) %>%
+  distinct(cellID, intID, .keep_all = TRUE) %>%  #distinct keeps the first row 
+  mutate(rank = row_number()) %>%
+  mutate(color = ifelse(UMIs_per_intID_per_Cell >= combo_UMI_cutoff,'Real intID', 'PCR error'))
+
+num_real_combos = intIDs_per_Cell_rank_df %>% filter(color == 'Real intID') %>% distinct(cellID, intID) %>% nrow()
+
+intID_umis_plot = intIDs_per_Cell_rank_df %>% 
+  ggplot(aes(x = rank, 
+             y = UMIs_per_intID_per_Cell, 
+             color = color)) +
+  geom_point() +
+  #scale_x_log10() +
+  scale_y_log10() +
+  ylab('UMIs per Combo') +
+  xlab('Cell+IntID Combo') +
+  geom_hline(yintercept = combo_UMI_cutoff, 
+             linetype = 'dotted') +
+  scale_color_brewer(palette = 'Dark2') +
+  annotate("text", 
+           x = max(intIDs_per_Cell_rank_df$rank), 
+           y = max(intIDs_per_Cell_rank_df$UMIs_per_intID_per_Cell),
+           vjust = 0.9,
+           hjust = 0.9,
+           label = paste('Real Combos:', 
+                         as.character(num_real_combos), 
+                         '\nUMIs/Combo \u2265', 
+                         combo_UMI_cutoff)) +
+  theme(legend.position = 'none')
+  
+intID_umis_plot
+
+
+cell_filt2_df = cell_filt_df %>% group_by(cellID) %>% mutate(intIDs_per_Cell = n_distinct(intID)) %>% filter(UMIs_per_intID_per_Cell >= combo_UMI_cutoff)
+
+
+step_name = paste('Remove Cell-intIDs with <', combo_UMI_cutoff, 'UMIs')
+add = 1
+add = ifelse(last(summary_df$Step) == step_name, 0, 1)
+summary_df[nrow(summary_df)+add, ] = c(step_name, 
+                                     cell_filt2_df %>% distinct(cellID) %>% nrow(), 
+                                     cell_filt2_df %>% ungroup %>% distinct(intID) %>% nrow(), 
+                                     cell_filt2_df %>% distinct(cellID, intID) %>% nrow(), 
+                                     cell_filt2_df %>%nrow(), 
+                                     sum(as.numeric(cell_filt2_df$totalReads)),
+                                     NA)
+
+summary_df %>% print()
+```
+\
+\
+
+
+#### Filter static barcodes (IntIDs) by the average # of transcripts (UMIs) they have across cells
+```{r fig.height=1.5, fig.width=1.8, echo=FALSE, message=FALSE, warning=FALSE, dpi=50, rows.print = 30}
+
+avg_intID_UMI_cutoff = 2
+
+
+avg_UMI_per_intID_per_Cell_rank = cell_filt2_df %>%
+  ungroup() %>%
+  group_by(intID) %>% mutate(avg_UMIs_per_intID_per_Cell_for_intID = mean(UMIs_per_intID_per_Cell)) %>%
+  ungroup() %>%
+  distinct(intID, .keep_all = TRUE) %>%
+  arrange(-avg_UMIs_per_intID_per_Cell_for_intID) %>%
+  mutate(rank = row_number()) %>%
+  mutate(color = ifelse(avg_UMIs_per_intID_per_Cell_for_intID > avg_intID_UMI_cutoff,'Real intID', 'PCR error'))
+ 
+
+num_real_intIDs = avg_UMI_per_intID_per_Cell_rank %>% distinct(intID, .keep_all = TRUE) %>% filter(avg_UMIs_per_intID_per_Cell_for_intID > avg_intID_UMI_cutoff) %>% nrow()
+
+
+intID_umis_plot = avg_UMI_per_intID_per_Cell_rank %>% 
+  ggplot(aes(x = rank, 
+             y = avg_UMIs_per_intID_per_Cell_for_intID, 
+             color = color)) +
+  geom_point() +
+  #scale_x_log10() +
+  scale_y_log10() +
+  ylab('Mean UMIs per Cell') +
+  xlab('IntID') +
+  geom_hline(yintercept = avg_intID_UMI_cutoff, 
+             linetype = 'dotted') +
+  scale_color_brewer(palette = 'Dark2') +
+  annotate("text", 
+           x = max(avg_UMI_per_intID_per_Cell_rank$rank), 
+           y = max(avg_UMI_per_intID_per_Cell_rank$avg_UMIs_per_intID_per_Cell_for_intID),
+           vjust = 0.9,
+           hjust = 0.9,
+           label = paste('Real IntIDs:', 
+                         as.character(num_real_intIDs), 
+                         '\nUMIs/Cell >', 
+                         avg_intID_UMI_cutoff)) +
+  theme(legend.position = 'none')
+  
+  
+intID_umis_plot
+
+
+avg_UMI_per_intID_per_Cell_rank = avg_UMI_per_intID_per_Cell_rank %>% select(intID, avg_UMIs_per_intID_per_Cell_for_intID)
+
+cell_filt3_df = cell_filt2_df %>% merge(avg_UMI_per_intID_per_Cell_rank, by = 'intID') %>% filter(avg_UMIs_per_intID_per_Cell_for_intID > avg_intID_UMI_cutoff)
+
+
+step_name = paste('Remove intIDs =<', avg_intID_UMI_cutoff, 'mean UMIs/cell')
+add = 1
+add = ifelse(last(summary_df$Step) == step_name, 0, 1)
+summary_df[nrow(summary_df)+add, ] = c(step_name, 
+                                     cell_filt3_df %>% distinct(cellID) %>% nrow(), 
+                                     cell_filt3_df %>% distinct(intID) %>% nrow(), 
+                                     cell_filt3_df %>% distinct(cellID, intID) %>% nrow(), 
+                                     cell_filt3_df %>%nrow(), 
+                                     sum(as.numeric(cell_filt3_df$totalReads)),
+                                     NA)
+
+summary_df %>% print()
+```
+\
+\
+
+
+#### Filter static barcodes (IntIDs) again by the number of cells in which they are recovered  
+* Setup mostly to remove IntIDs/barcodes that connect few cells to each other and are hence uninformative or sequencing errors
+```{r fig.height=1.5, fig.width=1.8, echo=FALSE, message=FALSE, warning=FALSE, dpi=50, rows.print = 30}
+
+cells_per_intID_cutoff = 5
+
+
+cells_per_intID_tally = cell_filt3_df %>% distinct(cellID, intID) %>% group_by(intID) %>% tally() %>% arrange(-n) %>% rename(cells_per_intID = n) %>%
+  mutate(rank = order(order(cells_per_intID, decreasing=TRUE))) %>%
+  arrange(rank) %>%
+  mutate(color = ifelse(cells_per_intID >= cells_per_intID_cutoff,'Real', 'Error'))
+
+
+final_number_of_intIDs = cells_per_intID_tally %>% filter(cells_per_intID >= cells_per_intID_cutoff) %>% nrow()
+
+
+intID_cells_plot = cells_per_intID_tally %>% 
+  ggplot(aes(x = rank, 
+             y = cells_per_intID, 
+             color = color)) +
+  geom_point() +
+  ylab('Cells with IntID') +
+  xlab('IntID') +
+  scale_y_log10() +
+  geom_hline(yintercept = cells_per_intID_cutoff, 
+             linetype = 'dotted') +
+  scale_color_brewer(palette = 'Dark2') +
+  annotate("text", 
+           x = max(cells_per_intID_tally$rank), 
+           y = max(cells_per_intID_tally$cells_per_intID),
+           vjust = 0.9,
+           hjust = 0.9,
+           label = paste(as.character(final_number_of_intIDs), 
+                         'IntIDs\nCells/IntID \u2265', 
+                         cells_per_intID_cutoff)) +
+  theme(legend.position = 'none') +
+  scale_x_continuous(breaks = pretty_breaks())
+  
+intID_cells_plot
+
+
+precluster_filt_df = cell_filt3_df %>% merge(select(cells_per_intID_tally, -rank, -color), by = 'intID') %>% filter(cells_per_intID >= cells_per_intID_cutoff)
+
+
+step_name = paste('Remove intIDs found in <', cells_per_intID_cutoff, 'cells')
+add = 1
+add = ifelse(last(summary_df$Step) == step_name, 0, 1)
+summary_df[nrow(summary_df)+add, ] = c(step_name, 
+                                     precluster_filt_df %>% distinct(cellID) %>% nrow(), 
+                                     precluster_filt_df %>% distinct(intID) %>% nrow(), 
+                                     precluster_filt_df %>% distinct(cellID, intID) %>% nrow(), 
+                                     precluster_filt_df %>%nrow(), 
+                                     sum(as.numeric(precluster_filt_df$totalReads)),
+                                     NA)
+
+summary_df %>% print()
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+##### Save dataframe left from initial filtering steps above #####
+precluster_filt_df %>% write.table(file = paste('output-files/', project_name, '_precluster_filtered.txt', sep = ''), sep = "\t", col.names = TRUE, row.names = FALSE, quote = FALSE)
+```
+
+\
+\
+\
+
+
+### Section 2: Discover clones and classify cells into clones via static barcode content
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+sample_n_groups = function(tbl, size, replace = FALSE, weight = NULL) {
+  # regroup when done
+  grps = tbl %>% groups %>% lapply(as.character) %>% unlist
+  # check length of groups non-zero
+  keep = tbl %>% summarise() %>% ungroup() %>% sample_n(size, replace, weight)
+  # keep only selected groups, regroup because joins change count.
+  # regrouping may be unnecessary but joins do something funky to grouping variable
+  tbl %>% right_join(keep, by=grps) %>% group_by_(.dots = grps)
+}
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+### need to downsample since the downstream hierarchal clustering method requires too much memory with >5-6K cells
+### take the entire PT and only downsample disseminated sites
+### since disseminated sites are dominated by a few clones, we find that this downsampling strategy results in a very small number of unmatched cells from the entire population
+
+set.seed(500)
+
+down_sample = 200
+
+precluster_filt_df_PT = precluster_filt_df %>% ungroup() %>% filter(sample == 'PT')
+precluster_filt_df_lung = precluster_filt_df %>% ungroup() %>% filter(sample == 'Lung')
+precluster_filt_df_liver200 = precluster_filt_df %>% ungroup() %>% filter(sample == 'Liver') %>% group_by(cellID) %>% sample_n_groups(down_sample)
+precluster_filt_df_met200 = precluster_filt_df %>% ungroup() %>% filter(sample == 'Met') %>% group_by(cellID) %>% sample_n_groups(down_sample)
+
+precluster_filt_df_downsample = bind_rows(precluster_filt_df_PT, 
+                                          precluster_filt_df_lung, 
+                                          precluster_filt_df_liver200, 
+                                          precluster_filt_df_met200)
+```
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Make preliminary matrix to then make overlap matrix
+test_matrix = precluster_filt_df_downsample %>%
+  distinct(cellID, intID, .keep_all = TRUE) %>%
+  arrange(-intIDs_per_Cell) %>%
+  mutate(presence = 1) %>%
+  select(cellID, intID, presence) %>%
+  spread(cellID, presence) %>%
+  mutate_all(~replace(., is.na(.), 0)) %>%
+  select(-intID)
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+### function for visualizing the clustering in corrplot to see that its decently logical
+corrRect.hclust = function(
+  corr,
+  k = 2,
+  col = "red",
+  lwd = 1.5,
+  method = c("complete", "ward", "ward.D", "ward.D2", "single", "average",
+            "mcquitty", "median", "centroid") 
+  )
+{
+  n = nrow(corr)
+  method = match.arg(method)
+  tree = hclust(as.dist(1 - corr), method = method)
+  hc = cutree(tree, k = k)
+  clustab = table(hc)[unique(hc[tree$order])]
+  cu = c(0, cumsum(clustab))
+
+  rect(cu[-(k + 1)] + 0.5,
+       n - cu[-(k + 1)] + 0.5,
+       cu[-1] + 0.5,
+       n - cu[-1] + 0.5,
+       border = col, lwd = lwd)
+  
+  return(hc)
+}
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+mat = crossprod(as.matrix(test_matrix[,-1]))            # calculate the intID overlap for cells              
+cor_df = floor(t(mat * 100 / diag(mat)))            # make so it's percent and it's transposed
+```
+
+
+#### Cluster cells by their static barcode contents 
+* Cells are compared to one another by their static barcode overlap  
+* Complete-linkage hierarchal clustering is used  
+    - i.e. every cell starts as its own cluster, pair-wise comparisons are made and larger and larger clusters form  
+* Takes around 15min to run for 4-5k cells, 3-5min for 1-2k cells  
+* Set the number of clusters to call (and highlight in red) manually - trial and error is required here
+* Overclustering is best at this initial step, i.e. visually check that no clearly seperate clusters are being incorrectly grouped together
+* This inital clustering is processed downstream and used to call real clones 
+
+```{r fig.height=3, fig.width=3, echo = FALSE, message=FALSE, warning=FALSE, dpi=50}
+knum = 116
+
+corrplot::corrplot(cor_df, method = 'color', order = 'hclust', tl.pos='n', cl.pos = 'n', is.corr = FALSE)
+cell_clusters = corrRect.hclust(corr = cor_df, k = knum)
+```
+\
+
+
+
+#### Cluster collapsing and cleanup to identify clones  
+* Clusters defined by identical sets or subsets of static barcodes are collapsed automatically  
+* After automatic cluster collapsing, the data must be checked manually  
+* Any uncollapsed clusters need to be manually collapsed (this is usually only the case for few to no clusters)  
+* Cells are then classified into finalized clusters (i.e. clones) & inter-clonal doublets and unmatched cells are identified  
+* Note the % of unmatched cells and doublets  
+    - The % of unmatched cells shouldn't be very high (less than a few percent)  
+    - The % of doublets shouldn't be very high (2-20% depending on cells loaded on 10x, check their guidelines)  
+    - High doublet or unmatched percentages would suggest an error clone calling, resulting in misclassification of cells  
+* Finally clones not rooted in the PT are filtered   
+    - While these clones may simply be due to undersampling, they may also be artifacts of the injection process  
+    - Only a few small clones are usually filtered by this step (very few overall cells are filtered)  
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+
+### make a dataframe from the cell_clusters called above and then add this cluster info to each cell of the main filtering dataframe
+temp_clusters_df = tibble::enframe(cell_clusters) %>%
+  rename(cellID = name) %>%
+  rename(clusterID = value)
+clustered_df = merge(precluster_filt_df_downsample, temp_clusters_df, by = 'cellID')
+
+
+fraction_cells_with_intID_in_cluster_cutoff = 0.20  # don't use intID to define a cluster if cluster has less than this fraction of cells with intID
+num_cell_in_cluster_cutoff = 5  # don't examine clusters with less than 5 cells
+strict_cutoff_cells = 20  # cutoff to define smaller clusters with more noise
+strict_cutoff_fraction = 0.35  # for noiser, smaller clusters use a more strict "fraction_cells_with_intID_in_cluster_cutoff" 
+
+
+### get df with just total number of cells in each cluster for merging below
+cluster_cell_tally = clustered_df %>% 
+  distinct(clusterID, cellID) %>% group_by(clusterID) %>% tally() %>% mutate(num_cell_in_cluster = n) %>% select(-n)
+
+### filter out small clusters and then filter out intIDs that fall below the above cutoffs in each cluster (i.e. cells that were misclustered)
+intID_cell_tally = clustered_df %>% distinct(clusterID, cellID, intID) %>% 
+  group_by(clusterID, intID) %>% tally() %>% arrange(clusterID, -n) %>% rename(num_cells_per_intID_in_cluster = n) %>%
+  merge(cluster_cell_tally, by = 'clusterID') %>%
+  mutate(fraction_cells_with_intID_in_cluster = num_cells_per_intID_in_cluster/num_cell_in_cluster) %>% 
+  filter(num_cell_in_cluster >= num_cell_in_cluster_cutoff) %>%
+  filter(ifelse(num_cell_in_cluster <= strict_cutoff_cells,
+                fraction_cells_with_intID_in_cluster >= strict_cutoff_fraction,
+                fraction_cells_with_intID_in_cluster >= fraction_cells_with_intID_in_cluster_cutoff)) %>%
+  arrange(-num_cells_per_intID_in_cluster) %>%
+  group_by(intID) %>% mutate(n = n(), is_dupe = ifelse(n > 1,TRUE,FALSE)) %>%
+  arrange(clusterID) 
+```
+
+
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+####### AUTOMATIC REMOVAL OF PERFECT DUPLICATE CLUSTERS #######
+
+# list of clusters after automatic processing
+### dataframe that gets fed downstream
+deduplicated_clusters = intID_cell_tally %>% arrange(clusterID, intID) %>% group_by(clusterID) %>% summarize(cluster_intID_list = paste(sort(unique(intID)),collapse=", ")) %>% distinct(cluster_intID_list, .keep_all = TRUE)
+
+### useful df to have if need to check previous step, but not used later on
+intID_cell_tally_deduplicated = intID_cell_tally %>% filter(clusterID %in% deduplicated_clusters$clusterID)
+
+
+
+####### AUTOMATIC REMOVAL OF IMPERFECT DUPLICATE CLUSTERS (I.E. SUBSETS OF THE SAME CLUSTER) #######
+
+deduplicated_cluster_numbers = deduplicated_clusters %>% select(clusterID)
+
+real_clusters_check = intID_cell_tally %>% arrange(clusterID, intID) %>% group_by(clusterID) %>% summarize(cluster_intID_list = list(unique(intID))) %>% inner_join(deduplicated_cluster_numbers, by = 'clusterID')
+
+incomplete_repeat_clusters = vector(mode = 'character', length = nrow(real_clusters_check))
+
+for (i in 1:nrow(real_clusters_check)) {
+  
+  single_cluster_booleans = vector(mode = 'character', length = nrow(real_clusters_check) - 1)
+  temp = slice(real_clusters_check, -i)
+  
+  for (j in 1:(nrow(real_clusters_check)-1)) {
+    
+    single_cluster_booleans[j] = all(real_clusters_check$cluster_intID_list[[i]] %in% temp$cluster_intID_list[[j]])
+    
+  }
+incomplete_repeat_clusters[i] = 'TRUE' %in% single_cluster_booleans
+}
+
+desubsetted_cluster_df = real_clusters_check %>% mutate(is_subset = incomplete_repeat_clusters)
+
+### dataframe that gets fed downstream
+real_clusters1 = desubsetted_cluster_df %>% filter(is_subset == 'FALSE')
+
+### useful df to have if need to check previous step, but not used later on
+intID_cell_tally_subsetted = intID_cell_tally %>% filter(clusterID %in% real_clusters1$clusterID) %>% 
+  group_by(intID) %>% mutate(n = n(), is_dupe = ifelse(n > 1,TRUE,FALSE)) %>%
+  #group_by(clusterID) %>% filter(!all(is_dupe == TRUE)) %>% 
+  arrange(clusterID) 
+```
+
+
+```{r echo = FALSE, message=FALSE, warning=FALSE, rows.print = 30}
+#### Manual removal of incorrect and redundant clusters that were missed in the automatic steps above  
+# * Here we make a dataframe of the final real clusters and their intIDs  
+# * We re-call clusterIDs for every cell-intID combo based on the real cluster intID lists  
+# * Cells that contain intIDs that don't match any real cluster are called as unmatched  
+# * Cells that map to more than 1 real cluster are called as inter-clonal doublets  
+# * Percent doublets should be 2-20% of total (depending on nature of experiment), much more and an error in real cluster calling probably occurred resulting in misclassification of cells
+
+########## MANUALLY REMOVE OR FIX UP IMPERFECT CLUSTERS ###########
+clusters_to_remove = c(24)
+clusters_to_convert = c()
+convert_to = 'WARNING'
+
+
+real_clusters = real_clusters1 %>% 
+  filter(!(clusterID %in% clusters_to_remove)) %>%
+  mutate(clusterID = ifelse(clusterID %in% clusters_to_convert, convert_to, clusterID)) %>% 
+  unnest(cluster_intID_list) %>% 
+  rename(intID = cluster_intID_list) %>%
+  distinct(clusterID, intID) %>%
+  arrange(clusterID, intID)
+
+```
+
+
+```{r echo = FALSE, message=FALSE, warning=FALSE, rows.print = 30}
+######### MATCH CELLS TO THE FINAL CLONES DEFINED BY THE STEPS ABOVE ##########
+######### Here we also label singlets, unmatched cells, and inter-clonal doublets ########
+
+###### for simplicity get only cells and intIDs from the big dataframe
+cell_intID_df = precluster_filt_df %>% distinct(cellID, intID) %>% arrange(cellID, intID) 
+
+###### match cells-intIDs to clusters and match cell-intID combos to '0' cluster if no match
+cell_matching_df = cell_intID_df %>% merge(real_clusters, by = 'intID', all = TRUE) %>% arrange(cellID, intID) %>%
+  mutate_all(~replace(., is.na(.), 0))
+
+###### add column that says the number of clusters a cell has matched to (by checking how many distinct clusters its intIDs have)
+cell_find_conflicting_df = cell_matching_df %>% 
+  group_by(cellID) %>% mutate(distinct_clusters_for_cell = n_distinct(clusterID)) %>%
+  mutate(is_inter_singlet = ifelse(distinct_clusters_for_cell == 1, 
+                                   'singlet', 
+                                   'inter-clonal doublet')) %>%
+  mutate(is_matched = ifelse(is_inter_singlet == 'singlet', 
+                             ifelse(clusterID == '0',
+                                    'unmatched',
+                                    'matched'),
+                                    'matched')) %>%
+  mutate(status = is_inter_singlet) %>% 
+  mutate(status = ifelse(is_matched == 'unmatched', 'unmatched', status)) %>%
+  mutate(status_w_clones = ifelse(status == 'singlet', as.character(clusterID), status)) %>% ungroup()
+```
+
+
+
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+######## Here we remove clones not found in the PT and renumber them based on largest to smallest in the PT #######
+
+#### take only singlets for calculating cluster size and use that to renumber clusters
+PT_temp_size_calc_df = cell_find_conflicting_df %>% filter(status == 'singlet') %>%
+  #### take only PT for size calc.
+  filter(grepl('PT_', cellID)) %>%
+  #### calc new cluster sizes
+  group_by(clusterID) %>% mutate(PT_cluster_size_NEW = n_distinct(cellID)) %>% ungroup() %>%
+  distinct(clusterID, PT_cluster_size_NEW)
+
+
+singlets1_df = cell_find_conflicting_df %>% filter(status == 'singlet') %>%
+  
+  #### keep only clones with PT 
+  inner_join(PT_temp_size_calc_df) %>%
+
+  #### calc new total cluster sizes
+  group_by(clusterID) %>% mutate(cluster_size_NEW = n_distinct(cellID)) %>% 
+  select(-distinct_clusters_for_cell) %>% ungroup() %>%
+  
+  #### renumber clusterIDs by size
+  mutate(clusterID_new = (ID = group_indices(., -PT_cluster_size_NEW, clusterID))) %>% 
+  select(-intID, -clusterID) %>% 
+  distinct(cellID, .keep_all = TRUE) %>%
+  
+  #### merge with complete precluster df
+  inner_join(precluster_filt_df, by = 'cellID') %>% 
+  distinct() %>% arrange(cellID, intID, UMI)  %>% # distinct is critical here
+  
+  #### remove outdated count columns, leave umis per intID-cell
+  select(-intIDs_per_Cell:-cells_per_intID) %>% 
+  
+  #### rename column for easier writing
+  rename(UMIs_per_intID_Cell = UMIs_per_intID_per_Cell) %>% 
+  
+  #### rename to 'cloneID' for future reference, since clones are settles on at this point
+  rename(cloneID = clusterID_new) %>%
+  
+  #### make new column with max barcodes in clone (i.e. how many intIDs define a clone)
+  #### this is used further down with doing intraclonal doublet filter visualization 
+  group_by(cloneID) %>% mutate(max_intIDs_per_clone = n_distinct(intID)) %>% ungroup()
+```
+
+
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+####### PRINT % DOUBLETS AND UNMATCHED CELLS
+
+#### all cells before any of the below filters/classifiers
+total_cells = cell_find_conflicting_df %>% distinct(cellID) %>% nrow()
+
+### find number of inter-clonal doublets
+inter_clonal_doublets = cell_find_conflicting_df %>% filter(status == 'inter-clonal doublet') %>% distinct(cellID) %>% nrow()
+### find number of inter-clonal singlets
+matched_singlets = cell_find_conflicting_df %>% filter(status == 'singlet') %>% distinct(cellID) %>% nrow()
+### find number of unmatched cells
+unmatched_singlets = cell_find_conflicting_df %>% filter(status == 'unmatched') %>% distinct(cellID) %>% nrow()
+
+# print out inter-clonal doublet/matching percentages
+paste('Percent inter-clonal doublets:', percent(inter_clonal_doublets/total_cells, 0.1)) #print percent to the nearest 0.1
+paste('Percent unmatched:', percent(unmatched_singlets/total_cells, 0.01)) #print percent to the nearest 0.01
+```
+\
+
+
+
+#### Visualize filtered singlets grouped by static clone  
+* Again replot how cells' static barcode contents overlap with only singlets displayed now  
+* Cells are grouped by clone and within a clone, cells are arranged from most to least missing information moving left to right along the diagonal  
+    - Hence why on the top left of a clonal square there will be individual solid squares, i.e. cells that only have one static barcode captured  
+    - The # of individual squares is the same as the number of static barcodes that define that clone  
+    - For example, the second largest clone near the top left is defined by 2 static barcodes, but most of the cells in this clone have both barcodes captured  
+* Note that only the PT is displayed below since no more than 6-8k cells can be run on a normal computer and the PT is most diverse and contains all clones  
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+### setup dataframes and matrices for replotting overlap matrix with only filtered singlets and finalized clones
+
+temp_singlets_df = singlets1_df %>% distinct(cellID, intID, cloneID) %>%
+  filter(str_detect(cellID, 'PT_'))
+
+cell_rename_df = temp_singlets_df %>%
+  group_by(cellID) %>% mutate(intIDs_per_Cell = n_distinct(intID)) %>% ungroup() %>%
+  arrange(cellID, intID) %>% 
+  group_by(cellID) %>% mutate(cell_intIDs_string = str_c(intID, collapse = '_')) %>% 
+  ungroup() %>%
+  add_count(cell_intIDs_string, name = 'cells_with_intIDcombo') %>%
+  arrange(cloneID, intIDs_per_Cell, cells_with_intIDcombo, cell_intIDs_string) %>%
+  arrange(cloneID) %>%
+  distinct(cellID) %>%
+  mutate(cell_order = row_number()) %>%
+  mutate(cell_name = sprintf("%010d", cell_order))
+
+singlets_for_matrix_df = temp_singlets_df %>% merge(cell_rename_df, by = 'cellID')
+
+clustered_matrix = singlets_for_matrix_df %>%
+  mutate(presence = 1) %>%
+  select(cell_name, intID, presence) %>%
+  spread(cell_name, presence) %>%
+  mutate_all(~replace(., is.na(.), 0)) %>%
+  select(-intID)
+
+check_mat = crossprod(as.matrix(clustered_matrix[,-1]))            # calculate the overlap               
+check_cor_df = floor(t(check_mat * 100 / diag(check_mat)))          # convert to percent and transpose?
+```
+
+```{r fig.height=3, fig.width=3, echo = FALSE, message=FALSE, warning=FALSE, dpi=50}
+corrplot::corrplot(check_cor_df, method = 'color', order = 'alphabet', tl.pos='n', cl.pos = 'n', is.corr = FALSE)
+```
+
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+### summarize remaining data after the clone calling steps above
+
+matched_singlets = singlets1_df %>% filter(status == 'singlet') %>% distinct(cellID) %>% nrow()
+
+# update summary table
+step_name = paste('Matched singlets (rm inter-clonal doublets)')
+add = 1
+add = ifelse(last(summary_df$Step) == step_name, 0, 1)
+summary_df[nrow(summary_df)+add, ] = c(step_name, 
+                                     matched_singlets, 
+                                     singlets1_df %>% distinct(intID) %>% nrow(), 
+                                     singlets1_df %>% distinct(cellID, intID) %>% nrow(), 
+                                     singlets1_df %>% nrow(), 
+                                     sum(as.numeric(singlets1_df$totalReads)),
+                                     singlets1_df %>% distinct(cloneID) %>% nrow())
+
+summary_df %>% print()
+```
+\
+\
+
+
+
+
+
+### Section 3: Organize and finalize outputs for downstream analyses
+
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+
+##### make an all_targets barcode column, for either 5 or 10 targets
+crispr_singlets_df = singlets1_df %>%
+    mutate(all_targets = paste(target1, target2, target3, target4, target5, sep ='_'))
+                             #target6, target7, target8, target9, target10, 
+                             #sep ='_'))
+
+##### figure out the number of unique intID transcripts a cell has and then the fraction each is of the total
+crispr_singlets_df  = crispr_singlets_df %>% 
+  add_count(cellID, intID, all_targets) %>% rename(UMIs_crispr_intID_cell = n) %>%
+  mutate(fraction_crispr_intID_cell = UMIs_crispr_intID_cell/UMIs_per_intID_Cell) %>%
+
+  ##### add an intID numbering column as int (this makes it easier to refer to them and makes their names have more meaning)
+  mutate(int = (ID = group_indices(., cloneID, intID)))
+
+```
+
+
+
+#### Expression level for each static barcode  
+* i.e. number of UMIs per static barcode per Cell  
+* Each data point is a unique cell-barcode pair  
+```{r fig.height=1.5, fig.width=3.75, echo = FALSE, message=FALSE, warning=FALSE, dpi=50}
+###### Plot UMIs/cell as jitter for each intID
+intID_UMI_jit_df = crispr_singlets_df %>% 
+  distinct(intID, cellID, .keep_all = TRUE) %>%
+  mutate(int = as.factor(int))
+
+clone_intID_jitter = intID_UMI_jit_df %>%
+  ggplot(aes(x = int, y = UMIs_per_intID_Cell, fill = as.factor(int))) +
+  geom_boxplot(size = 0.2, outlier.shape = NA) +
+  #geom_jitter(size = 0.4, alpha = 0.15, width = .2) +
+  ylab('CRISPR Transcripts/Cell\n(UMIs/Cell)') +
+  xlab('IntID') +
+  guides(color = guide_legend(override.aes = list(size=0.4, alpha = 1))) +
+  scale_color_brewer('# IntIDs in\nIntID Clone', palette = 'Dark2') +
+  guides(fill = FALSE) + 
+  scale_y_log10() +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, size = 3))
+
+clone_intID_jitter
+```
+\
+
+
+
+```{r fig.height=1.5, fig.width=3.75, echo = FALSE, message=FALSE, warning=FALSE, dpi=50}
+### like the below plot but here if you wanna visualize unique transcripts with no noise cutoff 
+unique_CRISPR_cell_intID_jit_df = crispr_singlets_df  %>% 
+  group_by(cellID, intID) %>% mutate(num_unique_CRISPR_cell_intID = n_distinct(all_targets)) %>% ungroup() %>%
+  distinct(intID, cellID, .keep_all = TRUE) %>%
+  mutate(int = as.factor(int)) %>%
+  group_by(int) %>% mutate(num_crispr_intID_mean = mean(num_unique_CRISPR_cell_intID))
+
+unique_CRISPR_cell_intID_jitter = unique_CRISPR_cell_intID_jit_df %>%
+  ggplot(aes(x = int, y = num_unique_CRISPR_cell_intID, 
+             color = as.factor(int))) +
+  geom_point(aes(y = num_crispr_intID_mean), shape = 95, size = 3) +
+  geom_jitter(size = 0.4, alpha = 0.25, width = .05) +
+  ylab('Unique CRISPR\nTranscripts/Cell') +
+  xlab('IntID') +
+  guides(color = FALSE) +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, size = 6)) +
+  scale_y_continuous(breaks = pretty_breaks(max(unique_CRISPR_cell_intID_jit_df$num_unique_CRISPR_cell_intID))) # breaks is set by max y value
+```
+
+
+
+#### Unique mutatagenized CRISPR barcode alleles per cell for each static barcode  
+* Jitter plot where each data point is a unique cell-barcode-allele pair, with mean overlayed as a dash  
+* Ideally each singlet has only one unique allele per static barcode after noise filtration (alleles comprising <25% of transcripts are filtered)  
+    - noise can be in the form of transcriptional, PCR, or sequencing errors present in a small fraction of transcripts detected for cell-barcode pair  
+* This is the case for most cells, but exceptions occur in the form of intraclonal doublets and barcode copy-number gain  
+    - i.e. since these PDAC cells are chromosomally unstable, there may be barcodes that have an increased copy number  
+* We id potentially duplicated or tripliacted barcodes and then id potential cell doublets  
+```{r fig.height=1.5, fig.width=3.75, echo = FALSE, message=FALSE, warning=FALSE, dpi=50}
+
+fraction_crispr_intID_cell_cutoff = 0.25
+
+filtered_crispr_singlets_df = crispr_singlets_df %>% 
+  ##### remove noise transcripts that fall below a thresold
+  filter(fraction_crispr_intID_cell >= fraction_crispr_intID_cell_cutoff)
+
+
+filtered_unique_CRISPR_cell_intID_jit_df = filtered_crispr_singlets_df %>%
+  group_by(cellID, intID) %>% mutate(num_unique_CRISPR_cell_intID = n_distinct(all_targets)) %>% ungroup() %>%
+  distinct(intID, cellID, .keep_all = TRUE) %>%
+  mutate(int = as.factor(int)) %>%
+  group_by(intID) %>% mutate(num_crispr_intID_mean = mean(num_unique_CRISPR_cell_intID))
+
+filtered_unique_CRISPR_cell_intID_jitter = filtered_unique_CRISPR_cell_intID_jit_df %>%
+  ggplot(aes(x = int, y = num_unique_CRISPR_cell_intID, 
+             color = as.factor(int))) +
+  geom_point(aes(y = num_crispr_intID_mean), shape = 95, size = 3) +
+  geom_jitter(size = 0.4, alpha = 0.25, width = .05) +
+  ylab('Unique CRISPR\nTranscripts/Cell') +
+  xlab('IntID') +
+  guides(color = FALSE) +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, size = 3)) +
+  scale_y_continuous(breaks = pretty_breaks(max(filtered_unique_CRISPR_cell_intID_jit_df$num_unique_CRISPR_cell_intID))) # breaks is set by max y value
+
+
+filtered_unique_CRISPR_cell_intID_jitter
+```
+
+
+
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+### Label likely duplicated or triplicated barcodes 
+### Uses the below cutoffs for identifying potentially duplicated or triplicated barcode integrations
+
+avg_dup_risk_cutoff = 1.3
+avg_trip_risk_cutoff = 1.8
+
+duplication_risk_df = filtered_crispr_singlets_df %>% 
+  group_by(cellID, intID) %>% mutate(num_unique_CRISPR_cell_intID = n_distinct(all_targets)) %>% ungroup() %>%
+  group_by(intID) %>% mutate(avg_unique_for_int = mean(num_unique_CRISPR_cell_intID)) %>% ungroup() %>%
+  distinct(intID, int, avg_unique_for_int)
+
+filtered_crispr_singlets_1_df = duplication_risk_df %>% 
+  mutate(duped_int = ifelse(avg_unique_for_int >= avg_dup_risk_cutoff,
+                        '2', 
+                        ifelse(avg_unique_for_int >= avg_trip_risk_cutoff,
+                               '3',
+                               '1'))) %>%
+  select(intID, duped_int) %>%
+  inner_join(filtered_crispr_singlets_df)
+
+
+### Call intra-clonal doublets
+### These doublets are called based on whether each barcode integration is predicted to be present at a single, double, or triple copy number
+### Cutoffs were set empirically by trying to match expected 10x doublet rate for the number of cells loaded (taking intra and inter clonal doublets into account in aggragate)
+
+filtered_crispr_singlets_2_df = filtered_crispr_singlets_1_df %>%
+  #### calculate again number of unique transcript remaining after filter per combo
+  group_by(cellID, intID) %>% mutate(num_unique_CRISPR_cell_intID = n_distinct(all_targets)) %>% ungroup() %>%
+  #### calculate doublet likehood by average num from all intIDs for a cell
+  group_by(cellID) %>% mutate(avg_unique_alleles_per_intID_per_cell = mean(num_unique_CRISPR_cell_intID))
+
+
+intraclonal_doublet_labeling_df = filtered_crispr_singlets_2_df %>% 
+  distinct(cellID, intID, .keep_all = TRUE) %>% 
+  group_by(cellID) %>%
+  mutate(is_intra_singlet = 
+           case_when(
+             all(duped_int == '1') ~ ifelse(avg_unique_alleles_per_intID_per_cell > 1.25, 
+                                              'intra-clonal doublet', 
+                                              'singlet'),
+             any(duped_int == '2') ~ ifelse(avg_unique_alleles_per_intID_per_cell > 3, 
+                                              'intra-clonal doublet', 
+                                              'singlet'),
+             any(duped_int == '3') ~ ifelse(avg_unique_alleles_per_intID_per_cell > 4.5, 
+                                              'intra-clonal doublet', 
+                                              'singlet'))) %>%
+  ungroup() %>% distinct(cellID, is_intra_singlet)
+```
+\
+
+
+
+
+
+#### Summarize data and finalize and generate 3 output files   
+* `final_classifications.txt` concisely stores cell type (i.e. single, doublet etc) and cloneID if matched singlet  
+* `final_singlets.txt` is a large file containing all info from alignment pipeline for final singlets  
+    - this includes all aligned transcripts as individual rows and full barcode sequences  
+* `final_editing_data.txt` is used for phylogeny building scripts downstream  
+    - here barcodes with potential copy-number gains are removed  
+    - only the top mutagenized transcript is retained for each cell-barcode pair  
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+
+#### keep only the singlets for downstream analysis
+crispr_df1 = filtered_crispr_singlets_2_df %>% 
+  left_join(intraclonal_doublet_labeling_df) %>%
+  filter(is_intra_singlet == 'singlet') %>% ungroup()
+
+### label harvest sites better
+crispr_df1 = crispr_df1 %>%
+  mutate(location = case_when(sample == 'PT' ~ 'Primary tumor',
+                              sample == 'Liver' ~ 'Liver mets',
+                              sample == 'Lung' ~ 'Lung mets',
+                              sample == 'Blood' ~ 'CTCs',
+                              sample == 'PTab' ~ 'Surgical site',
+                              sample == 'Met' ~ 'Peritoneal mets'))
+
+##### toss clones NOT in PT after intraclonal dub. removal (also rerank by new PT size)
+### also recalc total clone sizes after filtering
+crispr_df1_PT_only_temp = crispr_df1 %>%
+  filter(sample == 'PT') %>%
+  group_by(cloneID) %>% mutate(size_in_PT = n_distinct(cellID)) %>% ungroup() %>%
+  distinct(cloneID, size_in_PT)
+### toss the cells without PT clones and renumber
+crispr_df1 = crispr_df1 %>%
+  #### keep only clones with PT 
+  inner_join(crispr_df1_PT_only_temp, by = 'cloneID') %>%
+  #### calc new total cluster sizes
+  group_by(cloneID) %>% mutate(clone_size_post_intra = n_distinct(cellID)) %>% ungroup() %>%
+  #### renumber clones to be in the correct order after removal of intra-dubs
+  rename(cloneID_old = cloneID) %>%
+  mutate(cloneID = (ID = group_indices(., -size_in_PT, cloneID_old)))
+
+
+
+### cells that weren't able to be matched to a clone
+unmatched_singlets_df = cell_find_conflicting_df %>% 
+  filter(status == 'unmatched') %>% 
+  distinct(cellID) %>% mutate(type = 'unmatched')
+
+### inter dubs (includes for example unmatched-matched doublet)
+inter_clonal_doublets_df = cell_find_conflicting_df %>% 
+  filter(status == 'inter-clonal doublet') %>% 
+  distinct(cellID) %>% mutate(type = 'inter_doublet')
+
+### intra dubs
+intra_clonal_doublets_df = intraclonal_doublet_labeling_df %>% 
+  filter(is_intra_singlet == 'intra-clonal doublet') %>% 
+  distinct(cellID) %>% mutate(type = 'intra_doublet')
+
+### these are the cells we'll use for all transcriptome analyses, they are rooted in the PT and are singlets
+true_singlets_df = crispr_df1 %>% 
+  distinct(cellID) %>% mutate(type = 'final_singlet')
+
+### this is all the above classes bound together
+all_PT_clone_cells_df = do.call("rbind", 
+                            list(unmatched_singlets_df, 
+                                 inter_clonal_doublets_df,
+                                 intra_clonal_doublets_df,
+                                 true_singlets_df))
+
+### this is just those cells without a primary tumor clone remaining after all clone and doublet filtering
+all_noPT_clone_singlets_df = cell_find_conflicting_df %>% 
+  distinct(cellID) %>% mutate(type = 'no_PT_singlet') %>%
+  anti_join(all_PT_clone_cells_df, by = 'cellID')
+
+
+### this is all classification for all cells after the precluster-filt steps
+all_cells_classed_df = do.call("rbind", 
+                               list(all_PT_clone_cells_df,
+                                    all_noPT_clone_singlets_df))
+
+
+### add back updated clonal info from crispr_df1 above to these cells (intra-clonal doublets tho they do have a discrete clone are labeled as NA here however, since we won't be using them further)
+all_cells_classed_df = all_cells_classed_df %>% left_join(crispr_df1, by = 'cellID') %>% 
+  distinct(cellID, type, cloneID) %>% arrange(type, cloneID, cellID)
+
+
+
+### write this to table, these are the final singlets and updated clone numbers
+crispr_df1 %>% write.table(file = paste('output-files/', project_name, '_final_singlets.txt', sep = ''), sep = "\t", col.names = TRUE, row.names = FALSE, quote = FALSE)
+
+### write to file
+all_cells_classed_df %>% write.table(file = paste('output-files/', project_name, '_final_classifications.txt', sep = ''), sep = "\t", col.names = TRUE, row.names = FALSE, quote = FALSE)
+
+```
+
+
+
+
+
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+### summarize all classification totals
+
+all_cells_classed_df %>% distinct(cellID, type) %>% 
+  mutate(status = ifelse(str_detect(type, 'doublet'), 'doublet', type)) %>%
+  add_count(status, name = 'amount') %>% add_count(name = 'total_num') %>% mutate(percent = percent((amount/total_num), 0.1)) %>%
+  distinct(status, amount, percent)
+
+
+# update running summary table
+step_name = paste('Singlets remaining (rm intra-clonal doublets)')
+add = 1
+add = ifelse(last(summary_df$Step) == step_name, 0, 1)
+summary_df[nrow(summary_df)+add, ] = c(step_name,
+                                     crispr_df1 %>% distinct(cellID) %>% nrow(),
+                                     crispr_df1 %>% distinct(intID) %>% nrow(),
+                                     crispr_df1 %>% distinct(cellID, intID) %>% nrow(),
+                                     crispr_df1 %>%nrow(),
+                                     sum(as.numeric(crispr_df1$totalReads)),
+                                     crispr_df1 %>% distinct(cloneID) %>% nrow())
+
+summary_df %>% print()
+```
+
+
+
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+### you can just start from here if needed by setting crispr_df1 = "final_singlets.txt" file
+
+crispr_df2 = crispr_df1 %>%
+  #################################################################################################################
+  ##### REMOVE LIKELY DUPLICATED INTS FROM FURTHER ANALYSIS, BASED ON ABOVE THRESHOLD
+  ##### KEEP ONLY CELLS WITH A SINGLE ALLELE FOR EVERY INTID
+  #################################################################################################################
+  #### remove duplicated intIDs
+  filter(duped_int == '1') %>%
+  #### recalculate after removing duplicated intIDs
+  group_by(cellID, intID) %>% mutate(num_unique_CRISPR_cell_intID = n_distinct(all_targets)) %>% ungroup() %>%
+  group_by(cellID) %>% mutate(avg_unique_alleles_per_intID_per_cell = mean(num_unique_CRISPR_cell_intID)) %>%
+  filter(!any(avg_unique_alleles_per_intID_per_cell > 1)) %>% ungroup() %>%
+
+  
+  ##### throw out targets 6-10
+  select(-target6:-target10) %>%
+  select(-sequence6:-sequence10) %>%
+  ##### also remove sequences for used targets (1-5)
+  select(-sequence1:-sequence5) %>%
+  ##### remove more columns that are all the same or old
+  select(-is_inter_singlet:-status_w_clones) %>%
+  select(-runInfo:-mergedReadRef) %>%
+  select(-UMI:-UMIs_per_intID_Cell) %>%
+  select(-fraction_crispr_intID_cell) %>%
+  select(-num_unique_CRISPR_cell_intID:-avg_unique_alleles_per_intID_per_cell) %>%
+  distinct(cellID, intID, .keep_all = TRUE)
+
+crispr_df = crispr_df2 %>%
+  ##### gather by targets (1-5)
+  gather('target', 'target_edit', target1:target5) %>%
+  ##### separate out edits_in_target that have multiple edits into separate rows by &
+  separate_rows(target_edit, sep = '&') %>%
+
+  ##### separate out edit info, 1st by '+'(kinda) (tossing out insertion seq), 2nd by alphanumeric (keeping everything)
+  separate(target_edit, into = c("first", "edit_start"), remove = FALSE) %>%
+  separate(first, into = c("edit_length", "edit_type"), sep = "(?<=[0-9])(?=[A-Z])") %>%
+  ##### convert edit start and length columns to numeric values
+  mutate(edit_start = as.numeric(edit_start)) %>%
+  mutate(edit_length = as.numeric(edit_length)) %>% ungroup() %>%
+  
+  #################################### remove misaligned mutations #############################################
+  filter(all_targets != 'UNKNOWN_UNKNOWN_UNKNOWN_UNKNOWN_UNKNOWN') %>%
+  ##############################################################################################################
+
+  ##### make end position col using edit_start and edit_length, make so it's  inclusive of end, hence NO -1
+  ##### i.e something with length 1 should end and start at different bases - this is key for the visual segment display
+  ##### otherwise 1bp things don't appear
+  mutate(edit_end = edit_start + edit_length) %>%
+  
+  ##### add column for number of targets involved for an edit
+  group_by(cellID, intID, all_targets, target_edit) %>% mutate(num_targets_involved = n_distinct(target)) %>% ungroup() %>%
+  
+  ##### add edit_subtype column based on above to distinguish between intersite and intrasite deletions
+  ##### only performs the 2nd ifelse if the edit_type is a 'D' (deletion)
+  mutate(edit_subtype = ifelse(edit_type == 'D',
+                               ifelse(num_targets_involved == 1, 'Single-target Deletion', 'Multi-target Deletion'),
+                               'Insertion')) %>%
+  
+  ##### add a cell count for each unique crispr allele for a cloneID-intID pair
+  ##### note that if each intID is unique to a cloneID, then no need to do by pair, as is the plan for clone calling now
+  ##### however with possible future alterations in clone calling this is cleaner
+  group_by(cloneID, intID, all_targets) %>% mutate(cells_per_allele_clone_intID = n_distinct(cellID)) %>% ungroup()
+
+
+##### rank CRISPR alleles within a cloneID-intID pair (same as for intID alone) on number of cells they have
+rank_alleles_for_intID_df = crispr_df %>%
+  distinct(cloneID, intID, all_targets, .keep_all = TRUE) %>%
+  ##### add a column where alleles are ranked with a cloneID-intID-all_targets group by the number of cell they appear
+  group_by(cloneID, intID) %>% arrange(-cells_per_allele_clone_intID) %>% 
+  mutate(allele_rank_clone_intID = row_number()) %>% arrange(cloneID, intID, allele_rank_clone_intID) %>% ungroup() %>%
+  ##### remove repeated columns so merge can happen without duplication of columns
+  select(cloneID, intID, all_targets, allele_rank_clone_intID)
+
+
+##### add rankings back to crispr_df
+crispr_df = crispr_df %>%
+  left_join(rank_alleles_for_intID_df, by = c('cloneID', 'intID', 'all_targets')) %>%
+  ##### count the number of unique non-noise alleles per cloneID-intID pair and add a column (same as for intID alone)
+  group_by(cloneID, intID) %>% mutate(num_unique_CRISPR_alleles_per_intID = n_distinct(all_targets)) %>% ungroup() %>%
+
+  ##### assign colors by edit_subtype
+  mutate(color = case_when(edit_subtype == 'Single-target Deletion' ~ '#B20000',
+                           edit_subtype == 'Multi-target Deletion' ~ '#D06666',
+                           edit_subtype == 'Insertion' ~ '#0066ff')) %>%
+
+
+  ##### arrange in a nice order for inspection
+  arrange(cellID, intID, all_targets)
+
+
+crispr_df %>% write.table(file = paste('output-files/', project_name, '_final_editing_data.txt', sep = ''), sep = "\t", col.names = TRUE, row.names = FALSE, quote = FALSE)
+
+```
+
+\
+
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

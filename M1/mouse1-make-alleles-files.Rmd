@@ -1,0 +1,103 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+* The following makes a seperate barcode-of-barcodes (hmid) file for each clone  
+* Barcode-of-barcodes define subclones, the last column lists all the cells as a string in that subclone  
+* These files are then fed into `build_trees_w_wo_annotations.sh` which uses `TreeUtils-assembly-1.3.jar` to iterate over all the clones  
+* `TreeUtils-assembly-1.3.jar` uses PHYLIP Mix to output a newick tree for each clone  
+* PHYLIP Mix needs to be install and pointed to correctly in `build_trees_w_wo_annotations.sh`
+
+
+```{r}
+library(tidyverse)
+```
+
+
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+
+crispr_df = read.table(file = 'output-files/pdac_mouse1_final_editing_data.txt', sep = '\t', header = TRUE, fill = TRUE)
+
+```
+
+
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+
+### throw out multi-barcode alleles with this many cells or less
+large_clone_cell_cutoff = 1
+small_clone_cell_cutoff = 0
+small_large_cutoff = 50 #cells
+
+clone_min = min(crispr_df$cloneID)
+clone_max = max(crispr_df$cloneID)
+clones_list = deframe(crispr_df %>% distinct(cloneID) %>% arrange(cloneID))
+
+dir.create('TreeUtils/clone_hmids')
+
+for (clone in clone_min:clone_max) {
+  if (clone %in% clones_list) {
+    
+    crispr_df_by_clone = crispr_df %>% 
+      filter(cloneID == clone)
+    
+    cells_in_clone = crispr_df_by_clone %>% distinct(cellID) %>% nrow()
+    
+    #### diff cutoffs for large and small clones
+    cell_cutoff = ifelse(cells_in_clone >= small_large_cutoff, large_clone_cell_cutoff, small_clone_cell_cutoff)
+      
+    rank_intID_df = crispr_df_by_clone %>%
+      distinct(intID, cellID, .keep_all = TRUE) %>%
+      ##### add a column where intIDs are ranked by the number of cells that have them
+      group_by(intID) %>% mutate(cells_per_intID = n_distinct(cellID)) %>% ungroup() %>%
+      arrange(-cells_per_intID) %>% 
+      distinct(intID, .keep_all = TRUE) %>%
+      mutate(rank_intID = row_number()) %>% arrange(rank_intID) %>% ungroup() %>%
+      ##### remove repeated columns so merge can happen without duplication of columns
+      select(intID, rank_intID)
+    
+    multi_barcode_df = crispr_df_by_clone %>%
+      left_join(rank_intID_df, by = 'intID')
+    
+    temp_merge_df = multi_barcode_df %>%
+      distinct(cellID, intID, .keep_all = TRUE) %>%
+      select(cellID, rank_intID, all_targets) %>%
+      spread(rank_intID, all_targets) %>%
+      mutate_if(is.factor, as.character) %>%  ### this needs to happen for below replacement (didnt used to be an issue)
+      replace(., is.na(.), 'UNKNOWN_UNKNOWN_UNKNOWN_UNKNOWN_UNKNOWN') %>%
+      unite(all_barcodes, -cellID, sep = '_')
+    
+    multi_barcode_df = multi_barcode_df %>%
+      left_join(temp_merge_df, by = 'cellID') %>%
+      arrange(cellID, int) %>%
+      ##### add a column that counts distinct appearances of all_barcodes allele
+      group_by(all_barcodes) %>% mutate(num_cells_with_allBarcodes_allele = n_distinct(cellID))
+    
+    ##### rank barcode_of_barcode alleles within a cloneID on number of cells that have it
+    rank_all_barcodes_df = multi_barcode_df %>%
+      distinct(all_barcodes, .keep_all = TRUE) %>%
+      ##### add a column where all_barcodes is ranked by the number of cells it appears in
+      arrange(-num_cells_with_allBarcodes_allele) %>% 
+      mutate(allBarcodes_allele_rank_clone = row_number()) %>% arrange(allBarcodes_allele_rank_clone) %>% ungroup() %>%
+      ##### remove repeated columns so merge can happen without duplication of columns
+      select(all_barcodes, allBarcodes_allele_rank_clone)
+    
+    ##### add rankings back
+    multi_barcode_df = multi_barcode_df %>%
+      left_join(rank_all_barcodes_df, by = c('all_barcodes')) %>%
+      #### where cell cutoff is applied
+      filter(num_cells_with_allBarcodes_allele > cell_cutoff) %>%
+      distinct(cellID, .keep_all = TRUE) %>% select(all_barcodes, cellID) %>%
+      group_by(all_barcodes) %>% summarize(cells = paste(sort(unique(cellID)),collapse=", ")) %>%
+      rename(hmid = all_barcodes) %>% arrange(hmid) %>% mutate(index = row_number()-1) %>%
+      select(index, hmid, cells)
+    
+    multi_barcode_df$hmid = gsub("_", "-", multi_barcode_df$hmid)
+    
+    
+    multi_barcode_df %>% write.table(file = paste('TreeUtils/clone_hmids/clone', clone, 'for_tree.txt', sep = '_'), sep = "\t", col.names = TRUE, row.names = FALSE, quote = FALSE)
+    }
+}
+
+```
+
