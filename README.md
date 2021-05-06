@@ -55,7 +55,7 @@ This step consists of an R Notebook that provides a more detailed walkthrough of
 * `final_classifications.txt` concisely stores cell type (i.e. singlet, doublet, unmatched, etc) and cloneID if a cell is matched and a singlet
 * `final_editing_data.txt` is used for phylogeny building scripts downstream
 * Only `final_classifications.txt` and `final_editing_data.txt` will be used downstream
-* These outputs from our study are available through Mendeley Data: XXX
+* Corresponding outputs from our study are available at: XXX
 
 
 
@@ -70,7 +70,7 @@ This step consists of another R Notebook, which describes processing in detail i
 
 ### Outputs
 * A "barcode-of-barcodes" file for each clone is created and named as, `clone_XX_for_tree.txt`, and stored in a new directory named `/TreeUtils/clone_hmids`
-* These outputs from our study are available through Mendeley Data: XXX
+* Corresponding outputs from our study are available at: XXX
 
 
 
@@ -87,7 +87,7 @@ This step uses evolving barcode data from the "barcode-of-barcodes" subclone fil
 ### Outputs
 * All outputs are stored in the `/TreeUtils/clone_trees` directory
 * Outputs include json: `clone_XX.json` and newick: `clone_XX.json.newick` files for each processed clone
-* These outputs from our study are available through Mendeley Data: XXX
+* Corresponding outputs from our study are available at: XXX
 
 
 
@@ -106,7 +106,7 @@ This step consists of another R Notebook `make-edgelist.Rmd`, which takes all in
 ### Outputs
 * `full_edgelist.txt`
 * Example visualization can be viewed in: `make-edgelist.nb.html`
-* These outputs from our study are available through Mendeley Data: XXX
+* Corresponding outputs from our study are available at: XXX
 
 
 
