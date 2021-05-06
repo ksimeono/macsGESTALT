@@ -60,7 +60,7 @@ This step consists of an R Notebook that provides a more detailed walkthrough of
 
 
 ## Step 3: Identifying subclones based on evolving barcodes
-This step consists of another R Notebook which describes processing in detail inline with code. Briefly, as each cell can contain multiple barcode integrants, these distinct barcodes (defined by their distinct 10bp static identifiers) are merged into a 'barcode-of-barcodes', while also accounting for any missing barcodes that were not recovered in that cell. Cells with identical 'barcode-of-barcodes' are referred to as a 'subclone' as they are indistinguishably closely related. "Barcode-of-barcodes" files are constructed for each clone seperately (as each clone is defined by a different set of static identifiers), which are used downstream for phylogeny building. Note that as our data used pancreatic cancer cells, which are chromosomally unstable, some barcode integrants were duplicated, which impairs downstream reconstruction. Hence, we can't perform subclonal reconstruction on some clones. These are filtered out temporarily at this step and do not have corresponding "barcode-of-barcodes" files.
+This step consists of another R Notebook, which describes processing in detail inline with code. Briefly, as each cell can contain multiple barcode integrants, these distinct barcodes (defined by their distinct 10bp static identifiers) are merged into a 'barcode-of-barcodes', while also accounting for any missing barcodes that were not recovered in that cell. Cells with identical 'barcode-of-barcodes' are referred to as a 'subclone' as they are indistinguishably closely related. "Barcode-of-barcodes" files are constructed for each clone seperately (as each clone is defined by a different set of static identifiers), which are used downstream for phylogeny building. Note that as our data used pancreatic cancer cells, which are chromosomally unstable, some barcode integrants were duplicated, which impairs downstream reconstruction. Hence, we can't perform subclonal reconstruction on some clones. These are filtered out temporarily at this step and do not have corresponding "barcode-of-barcodes" files.
 
 ### Inputs
 * `final_editing_data.txt`
@@ -69,7 +69,7 @@ This step consists of another R Notebook which describes processing in detail in
 * R Notebook: `make-alleles-files.Rmd`
 
 ### Outputs
-* A "barcode-of-barcodes" file for each clone is created and named as, `clone_XX_for_tree.txt`, and stored in a new directory named `clone_hmids`
+* A "barcode-of-barcodes" file for each clone is created and named as, `clone_XX_for_tree.txt`, and stored in a new directory named `/TreeUtils/clone_hmids`
 * These outputs from our study are available through Mendeley Data: XXX
 
 
@@ -78,14 +78,45 @@ This step consists of another R Notebook which describes processing in detail in
 This step uses evolving barcode data from the "barcode-of-barcodes" subclone files to build a seperate tree for each clone, using TreeUtils: https://github.com/mckennalab/TreeUtils, which itself uses Camin-Sokal maximum parsimony as implemented in PHYLIP Mix. All of the data files and code used in this section can be downloaded from the `TreeUtils` folder in Mendeley Data: XXX
 
 ### Inputs
-* The `clone_hmids` directory containing `clone_XX_for_tree.txt` files 
+* The `TreeUtils/clone_hmids` directory containing `clone_XX_for_tree.txt` files 
 
 ### Scripts
-* 
+* `TreeUtils-assembly-1.3.jar` performs phylogeny building (don't call this directly)
+* `build_trees.sh` runs TreeUtils for every clone in the `/TreeUtils/clone_hmids` directory automatically
 
 ### Outputs
-* A "barcode-of-barcodes" file for each clone is created and named as, `clone_XX_for_tree.txt`, and stored in a new directory named `clone_hmids`
+* All outputs are stored in the `/TreeUtils/clone_trees` directory
+* Outputs include json: `clone_XX.json` and newick: `clone_XX.json.newick` files for each processed clone
 * These outputs from our study are available through Mendeley Data: XXX
+
+
+
+## Step 5: Build master edgelist & visualization
+This step consists of another R Notebook `make-edgelist.Rmd`, which takes all individual newick clone trees produced in the previous step and collates them into one master tree. This step also adds back cells from clones that did not have a corresponding phylogeny (e.g. due to chromosomal instability and barcode integrant duplication). These trees are merged and stored as an "edgelist". Edgelists can be easily converted to other useful data structures in R, such as a graph using the R package `igraph`. This can then be readily visualized as a circle packing plot (as in our paper) or different tree shapes using `ggraph`. A vignette on how to visualize an annotated example phylogeny from our metastasis data using `igraph` and `ggraph` is also included at the end of the R Notebook. All data files and code for this step are available through Mendeley Data: XXX.
+
+### Inputs
+* The `/TreeUtils/clone_trees` directory containing `clone_XX_for_tree.txt` files
+* `final_classifications.txt` for clones which do not have corresponding phylogenies
+* Additionally, trees can be annotated with single-cell transcriptional information, we've made the scRNA-seq cell metadata (from Monocle 3 cds) from our metastasis datasets are available as an example
+
+### Scripts
+* R Notebook: `make-edgelist.Rmd` performs all collation steps and includes a visualization vignette
+* This Notebook relies on `igraph`: https://igraph.org/ and `ggraph`: https://ggraph.data-imaginist.com/index.html for visualization
+
+### Outputs
+* `full_edgelist.txt`
+* Example visualization can be viewed in: `make-edgelist.nb.html`
+* These outputs from our study are available through Mendeley Data: XXX
+
+
+
+
+
+
+
+
+
+
 
 
 
