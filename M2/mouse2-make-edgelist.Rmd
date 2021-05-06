@@ -1,0 +1,308 @@
+---
+title: "Mouse 2 draw tree"
+output: html_notebook
+---
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ggraph)
+library(igraph)
+library(phytools)
+library(cowplot)
+theme_set(theme_cowplot())
+library(RColorBrewer)
+```
+
+create a diverse, large, and pleasing color palette by joining all qualitative colorbrewer palettes
+```{r}
+### list all the qual. color palettes
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+### unlist them into a single vector that can be called just by 'col_vector'
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+```
+
+
+load clonal data for filling in cells from clones where no tree could be generated
+```{r}
+classification_df = read.table('output-files/pdac_mouse2_final_classifications.txt', sep = '\t', header = TRUE, fill = TRUE)
+```
+
+
+function for renaming harvest sites to full names from shorthand
+```{r}
+assignSample = function(df) {
+  ### get sample info, only keep the first part as new sample column
+  named_df = df %>% 
+    separate(cellID, 'sample_abv', remove = FALSE, sep = '_') %>% 
+    mutate(sample_abv = str_trim(sample_abv, side = 'both')) %>%
+    mutate(sample = case_when(sample_abv == 'PT' ~ 'Primary tumor',
+                              sample_abv == 'PTab' ~ 'Surgical site',
+                              sample_abv == 'Met' ~ 'Peritoneal met',
+                              sample_abv == 'Liver' ~ 'Liver met',
+                              sample_abv == 'Lung' ~ 'Lung met',
+                              sample_abv == 'Blood' ~ 'CTC'))
+  return(named_df)
+}
+```
+
+
+function to match cells to their subclones
+```{r}
+alleles2subc = function(df) {
+  sc_df = df %>% 
+    ### use index to make names to match treeUtils output names
+    mutate(name = paste('N', index, sep ='')) %>%
+    ### essentially lengthen by cellID
+    mutate(cellID = strsplit(as.character(cells), split = ',')) %>%
+    unnest(cellID) %>%
+    select(name, cellID, hmid) %>%
+    assignSample()
+  
+  return(sc_df)
+}
+```
+
+
+recursive function to calculate size (cells recovered) for internal nodes
+```{r}
+options(expressions = 500000)
+
+recurse_size = function(df) {
+  
+  recurse = function(df) {
+      
+      if(!any(is.na(df$size))) {
+        
+        return(df)
+      
+        } else {
+          
+        df = df %>% 
+          group_by(V1) %>% summarise(size = sum(size)) %>% ungroup() %>%
+          filter(!is.na(size)) %>%
+          dplyr::rename(V2 = V1) %>% 
+          right_join(df, by = 'V2') %>% 
+          mutate(size = coalesce(size.x, size.y)) %>%
+          select(V1, V2, size)
+        
+        return(recurse(df))
+        
+      }
+    }
+  
+  V1nodes = df %>% distinct(V1) %>% deframe()
+  V2nodes = df %>% distinct(V2) %>% filter(str_detect(V2, '^Node')) %>% deframe()
+
+  if(all(V2nodes %in% V1nodes)) {
+    
+    recurse(df)
+    
+  } else {
+    
+    childless_nodes = V2nodes[!V2nodes %in% V1nodes]
+    
+    print(paste('Removed V2 Node(s) without children: ', childless_nodes, sep = ''))
+    
+    return(df %>% filter(!(V2 %in% childless_nodes)) %>% recurse_EMT())
+    
+  }
+  
+}
+```
+
+
+
+
+load allele files and newick files (TreeUtils output) for each clone 
+```{r}
+
+newick_files = list.files(path = "TreeUtils/clone_trees", pattern = "*.json.newick", full.names = TRUE)
+newick_cloneIDs = as.numeric(gsub(".*?([0-9]+).*", "\\1", newick_files))
+names(newick_files) = newick_cloneIDs
+
+allele_files = list.files(path = "TreeUtils/clone_hmids", pattern = "*.txt", full.names = TRUE)
+allele_cloneIDs = as.numeric(gsub(".*?([0-9]+).*", "\\1", allele_files))
+names(allele_files) = allele_cloneIDs
+
+```
+
+
+
+build the master edgelist for all cells (this data structure allows conversion to igraph for downstream visualization with ggraph)
+```{r message=FALSE, warning=FALSE}
+
+### get all clones 
+all_clones_list = classification_df %>% distinct(cloneID) %>% filter(!is.na(cloneID)) %>% deframe()
+
+pos = 1
+
+edge_lists = list()
+
+for (clone in all_clones_list) {
+  
+  if (clone %in% newick_cloneIDs) {
+    
+    alleles_df = read.table(allele_files[[as.character(clone)]], sep = '\t', header = TRUE, fill = TRUE)
+    subclones_df = alleles2subc(alleles_df)
+    vertices_df = subclones_df %>%
+      select(name, cellID, sample) %>%
+      mutate(name = paste('Clone', as.character(clone), '-', name, sep = '')) %>%
+      dplyr::rename(V1 = name) %>%
+      dplyr::rename(V2 = cellID)
+    
+    tree = read.tree(newick_files[[as.character(clone)]])
+    temp_graph = as.igraph(tree)
+    
+    elist_df = as.data.frame(as_edgelist(temp_graph)) %>%
+      mutate(sample = NA) %>%
+      mutate(V1 = paste('Clone', as.character(clone), '-', V1, sep = '')) %>%
+      mutate(V2 = paste('Clone', as.character(clone), '-', V2, sep = '')) %>%
+      rbind(vertices_df) %>%
+      add_row(V1 = 'Cancer_root', V2 = paste('Clone', as.character(clone), '-Node1', sep = ''), sample = NA)
+    
+    
+    edge_lists[[pos]] = elist_df
+    
+    pos = pos + 1
+    
+  } else {
+    
+    subclones_df = classification_df %>%
+      filter(cloneID == clone) %>%
+      filter(type == 'final_singlet') %>%
+      distinct(cellID) %>%
+      assignSample() %>%
+      mutate(name = paste('Clone', as.character(clone), '-Node1', sep = ''))
+    
+    elist_df = subclones_df %>%
+      select(name, cellID, sample) %>%
+      dplyr::rename(V1 = name) %>%
+      dplyr::rename(V2 = cellID) %>%
+      add_row(V1 = 'Cancer_root', V2 = paste('Clone', as.character(clone), '-Node1', sep = ''), sample = NA)
+
+    
+    edge_lists[[pos]] = elist_df
+    
+    pos = pos + 1
+  }
+}
+
+### reorder and factor samples so that they get plotted in correct order
+### reorder and factor cloneID so that they get plotted in correct order
+master_elist_df = bind_rows(edge_lists) %>%
+  mutate(sample = factor(sample, levels = c('Primary tumor',
+                                            'CTC',
+                                            'Lung met',
+                                            'Liver met',
+                                            'Peritoneal met',
+                                            'Surgical site',
+                                            NA))) %>% 
+  arrange(V1, sample) %>%
+  mutate(clone_extract = ifelse(str_detect(V2, '_'), V1, V2)) %>%
+  separate(clone_extract, into = 'cloneID', 
+           remove = FALSE, sep = '-') %>%
+  mutate(cloneID = str_remove(cloneID, 'Clone') %>% as.factor()) %>%
+  select(-clone_extract)
+```
+
+
+calculate sizes for all nodes (including internal)
+```{r message=FALSE, warning=FALSE}
+### make a temporary edgelist for calculating subclone size, and make individual cells equal to 1
+size_elist_df = master_elist_df %>% mutate(size = ifelse(str_detect(V2, '_'), 1, NA)) %>%
+  select(V1, V2, size)
+
+### run function to calc sizes
+size_elist_df = size_elist_df %>% recurse_size()
+
+### the below commented out line just displays the size of each clone (i.e. Node1 for each clone)
+# size_elist_df %>% filter(str_detect(V2, '-Node1$')) %>% arrange(-size) 
+
+### add sizes back
+master_elist_df1 = master_elist_df %>% left_join(size_elist_df %>% select(-V1), by = 'V2')
+```
+
+
+
+save full edgelist file
+```{r}
+master_elist_df1 %>% write.table(file = 'output-files/pdac_mouse2_full_edgelist.txt', sep = "\t", col.names = TRUE, row.names = FALSE, quote = FALSE)
+```
+
+
+
+* the below is an example of how to plot a radial subclone tree with all nodes and edges scaled by size and colored by clone  
+* the first several lines are just to collapse to subclones (since can be unwieldy to visualize all cells)  
+* then a "vertice" or node dataframe is generated (for igraph conversion)  
+* then we create the plot with ggraph  
+* a variety of visualization layouts are possible (including circlepacking plots)  
+* see here for tutorials on ggraph layouts: https://www.data-imaginist.com/2017/ggraph-introduction-layouts/
+```{r fig.height=3, fig.width=3, message=FALSE, warning=FALSE}
+### remove all rows that are cells in V2, this way we can only plot subclones in tree, since displaying all cells can be unwielding for visualizing trees
+master_elist_df2 = master_elist_df1 %>% filter(!str_detect(V2, '_'))
+
+### the below lines all deal with getting the clones to be plotted and colored in the correct order
+master_elist_df2 = master_elist_df2 %>% mutate(clone = as.numeric(as.character(cloneID))) %>% arrange(clone)
+
+master_elist_df2$cloneID = factor(master_elist_df2$cloneID, 
+                                  levels = (unique(master_elist_df2$clone)))
+
+master_elist_df2$cloneID = as.ordered(master_elist_df2$cloneID)
+
+
+### check the order in which clones will be plotted and colored, 1st line is order and 2nd line is color
+# master_elist_df2 %>% distinct(clone)
+# master_elist_df2$cloneID %>% levels()
+
+
+### start plotting portion
+set.seed(1)
+
+### if you want to give the root node a size value (i.e. all singlets recovered)
+# total_cells = classification_df %>% filter(type == 'final_singlet') %>% nrow()
+
+### make a vertices df which explicitly defines all nodes and provides metadata
+### this is needed for igraph conversion below 
+vertices = master_elist_df2 %>%
+  distinct(V2, sample, cloneID, size) %>%
+  ### add row for the root of the tree
+  add_row(V2 = 'Cancer_root', sample = NA, cloneID = NA, size = NA)
+
+### convert to igraph
+graph = graph_from_data_frame(master_elist_df2, vertices = vertices)
+
+### plot
+ggraph(graph, layout = 'dendrogram', circular = TRUE) +
+  geom_edge_elbow(aes(color = as.factor(cloneID), width = size)) + 
+  scale_edge_color_manual(values = col_vector, guide = 'none') +
+  scale_edge_width_continuous(range = c(.05, 2), breaks = c(10, 100, 1000, 10000), labels = c(10, 100, 1000, 10000),
+                        name = 'Cells') +
+  geom_node_point(aes(color = as.factor(cloneID), size = size)) +
+  scale_color_manual(values = col_vector,
+                     guide = 'none') +
+  scale_size_continuous(range = c(0.1, 4), breaks = c(10, 100, 1000, 10000), labels = c(10, 100, 1000, 10000),
+                        name = 'Cells') +
+  coord_fixed() +
+  theme(legend.key.width = unit(.3, 'in'))
+
+#ggsave('tree_subclones.pdf', height=4, width=4)
+```
+
+
+
+\
+
+
+load transcriptional metadata if you want to annotate phylogenetic plots by some phenotypic data you can find that here, below lines also make columns compatible for merging with edgelist produced downtstream
+```{r}
+mouse2_cds_colData = read.table('input-files/mouse2_cds_colData.txt', sep = '\t', header = TRUE) %>%
+  dplyr::rename(V2 = rowname) %>%
+  mutate(V2 = str_remove(V2, 'M1_')) %>%
+  mutate(V2 = str_trim(V2, side = 'both')) %>% ungroup()
+```
+
+
+
+
+
+
