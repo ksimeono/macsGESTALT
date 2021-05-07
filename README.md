@@ -1,5 +1,10 @@
-# macsGESTALT analysis workflow
-Scripts for processing single-cell lineage tracing data using macsGESTALT, as introduced here: https://doi.org/10.1101/2020.08.11.245787
+# macsGESTALT lineage tracing analysis workflow
+macsGESTALT is a high resolution, inducible lineage recorder, enabling simultaneous capture of lineages and transcriptomes from single cells.
+**(A)** Genetic components of macsGESTALT. **(B)** Clone-level information is stored in static barcodes, while subclonal phylogenetic information is dynamically encoded into evolving barcodes via insertions and deletions (indels, blue and red bars) induced by administration of doxycycline. **(C)** Two example clones from a population with n clones, each with a random number of integrated barcodes. Evolving barcode edits are encoded and inherited as cells divide. **(D)** Generation of a macsGESTALT barcoded population of cells and experimental workflow. **(E)** macsGESTALT analysis workflow. First, clonal lineage is reconstructed, followed by subclonal reconstruction, and phylogeny building between subclones.
+
+#### We introduce macsGESTALT and apply it to reconstruct pancreatic cancer metastasis here: https://doi.org/10.1101/2020.08.11.245787
+#### An example of a phylogeny reconstructed from scRNA-seq of macsGESTALT traced metastatic pancreatic cancer:
+
 
 
 ## Overview
