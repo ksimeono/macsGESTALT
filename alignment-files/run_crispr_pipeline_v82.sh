@@ -1,0 +1,17 @@
+java -Xmx4g -jar /app/queue.jar \
+ -S /app/sc_GESTALT/pipelines/CRISPR_analysis_PE_V2.scala  \
+ -i /app/sc_GESTALT/transfer-folder_v82/tearsheet_v82.txt \
+ --aggLocation /var/www/html/test10Xdata/ \
+ --expName test10Xdata \
+ --eda /app/EDNAFULL.Ns_are_zero \
+ -run \
+ -resMemReqParam mfree \
+ -s /app/sc_GESTALT/scripts/ \
+ -b /app/bin/ \
+--noTree \
+--scala "/usr/bin/scala -nocompdaemon" \
+--umiLength 28 \
+--primersToUse NONE \
+--minimumUMIReads 2 \
+--umiIndex index2 \
+--dontTrim
