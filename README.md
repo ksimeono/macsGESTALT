@@ -1,14 +1,28 @@
 # macsGESTALT lineage tracing analysis workflow
-macsGESTALT is a high resolution, inducible lineage recorder, enabling simultaneous capture of lineages and transcriptomes from single cells.
+<img width="1548" alt="fig1" src="/github-figs/fig1.png">
+
+**macsGESTALT is an inducible lineage recorder, enabling simultaneous capture of lineages and transcriptomes from single cells** 
 **(A)** Genetic components of macsGESTALT. **(B)** Clone-level information is stored in static barcodes, while subclonal phylogenetic information is dynamically encoded into evolving barcodes via insertions and deletions (indels, blue and red bars) induced by administration of doxycycline. **(C)** Two example clones from a population with n clones, each with a random number of integrated barcodes. Evolving barcode edits are encoded and inherited as cells divide. **(D)** Generation of a macsGESTALT barcoded population of cells and experimental workflow. **(E)** macsGESTALT analysis workflow. First, clonal lineage is reconstructed, followed by subclonal reconstruction, and phylogeny building between subclones.
 
-#### We introduce macsGESTALT and apply it to reconstruct pancreatic cancer metastasis here: https://doi.org/10.1101/2020.08.11.245787
-#### An example of a phylogeny reconstructed from scRNA-seq of macsGESTALT traced metastatic pancreatic cancer:
+<img width="1548" alt="fig1" src="/github-figs/fig4.png">
+
+**An example lineage reconstruction from this paper using scRNA-seq of macsGESTALT traced metastatic pancreatic cancer:**
+**(A)** Percent at which each base is mutated in 76,974 recovered evolving barcodes across both mice. Target site spacers (light grey) and PAMs (dark grey) are indicated. **(B)** Edit types observed at each target site across the same evolving barcodes as in (A). **(C)** Example phylogenetic reconstruction of a small clade within clone M1.1. Clade M1.1.310 (root node in red) contains 6 distinct subclones composed of 58 cells from 5 different harvest sites. Each cell in this clade has 6 evolving barcodes, illustrated by white bars with colored edits overlaid. Cells with the same barcode editing pattern are grouped into a subclone; subclone phylogeny is inferred from common and distinct edits. Dotted lines emerging from each subclone node represent the harvest sites from which cells were recovered. Subclone dissemination is a statistical metric of how equally a subclone's cells are distributed across sites (Shannon Equitability, adjusted for sampling size), where 0 is no dissemination. Individual cells are stacked and colored by site on the far right. **(D)** Circle packing plot of the full single cell phylogeny of mouse 1, with clade M1.1.310 from (C) circled in red. Outermost circles (heavy black borders) define individual clones, with the 6 largest clones labeled. Within each clone, nested circles group increasingly related cells based on their barcode editing patterns. Innermost circles contain cells from reconstructed subclones. Each point represents a single cell, colored by harvest site. 
+
+
+## Paper and data access
+* We introduce macsGESTALT and apply it to study cancer metastasis here: https://doi.org/10.1101/2020.08.11.245787
+* Raw fastq data from this study can be downloaded from GEO: GSE173958
+* All intermediate and processed data files can be downloaded from Mendeley Data: XXX
+* For recreating our study or for testing with example data, we recommended downloading the Mendeley Data repository
+* Using the Mendeley Data repo, all scripts and output and input data files can be run and accessed within a coherent directory structure
+* Lineage trees from the above paper can be interactively explored here: https://macsgestalt.mckennalab.org/
 
 
 
-## Overview
-There are 5 main steps:
+## Analysis overview
+This readme covers how macsGESTALT single cell lineage tracing data is processed and analyzed from start to finish. It also contains links throughout to where you can find our raw, intermediate, and processed data from the pancreatic cancer metastasis paper.
+There are 5 main steps to analysis:
 1) Barcode alignment & indel calling
 2) Barcode processing & identifying clones based on static barcodes
 3) Identifying subclones based on evolving barcodes
