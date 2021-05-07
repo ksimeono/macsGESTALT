@@ -116,7 +116,7 @@ This step consists of another R Notebook `make-edgelist.Rmd`, which takes all in
 ### Inputs
 * The `/TreeUtils/clone_trees` directory containing `clone_XX_for_tree.txt` files
 * `final_classifications.txt` for clones which do not have corresponding phylogenies
-* Additionally, trees can be annotated with single-cell transcriptional information, we've made the scRNA-seq cell metadata (from Monocle 3 cds) from our metastasis datasets are available as an example
+* Additionally, trees can be annotated with single-cell transcriptional information, example scRNA-seq cell metadata (from a Monocle 3 cds) from our metastasis datasets is available here: XXX, files named `cds_colData.txt`
 
 ### Scripts
 * R Notebook: `make-edgelist.Rmd` performs all collation steps and includes a visualization vignette
