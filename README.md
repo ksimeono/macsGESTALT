@@ -13,7 +13,7 @@
 ## Paper and data access
 * We introduce macsGESTALT and apply it to study cancer metastasis here: https://doi.org/10.1101/2020.08.11.245787
 * Raw fastq data from this study can be downloaded from GEO: GSE173958
-* All intermediate and processed data files can be downloaded from Mendeley Data: XXX
+* All intermediate and processed data files can be downloaded from Mendeley Data: http://dx.doi.org/10.17632/t98pjcd7t6.1
 * For recreating our study or for testing with example data, we recommended downloading the Mendeley Data repository
 * Using the Mendeley Data repo, all scripts and output and input data files can be run and accessed within a coherent directory structure
 * Lineage trees from the above paper can be interactively explored here: https://macsgestalt.mckennalab.org/
@@ -48,7 +48,7 @@ This step collapses barcode sequencing reads by UMI, aligns to a reference barco
 
 ### Outputs
 * This pipeline produces a series of files for each sample, but we only use the `.stats` files for downstream processing
-* The `.stats` files produced by our study are available through GEO: GSE173958 or through Mendeley Data: XXX
+* The `.stats` files produced by our study are available through GEO: GSE173958 or through Mendeley Data: http://dx.doi.org/10.17632/t98pjcd7t6.1
 
 
 
@@ -74,7 +74,7 @@ This step consists of an R Notebook that provides a more detailed walkthrough of
 * `final_classifications.txt` concisely stores cell type (i.e. singlet, doublet, unmatched, etc) and cloneID if a cell is matched and a singlet
 * `final_editing_data.txt` is used for phylogeny building scripts downstream
 * Only `final_classifications.txt` and `final_editing_data.txt` will be used downstream
-* Corresponding outputs from our study are available at: XXX
+* Corresponding outputs from our study are available at: http://dx.doi.org/10.17632/t98pjcd7t6.1
 
 
 
@@ -89,12 +89,12 @@ This step consists of another R Notebook, which describes processing in detail i
 
 ### Outputs
 * A "barcode-of-barcodes" file for each clone is created and named as, `clone_XX_for_tree.txt`, and stored in a new directory named `/TreeUtils/clone_hmids`
-* Corresponding outputs from our study are available at: XXX
+* Corresponding outputs from our study are available at: http://dx.doi.org/10.17632/t98pjcd7t6.1
 
 
 
 ## Step 4: Intraclonal phylogeny building
-This step uses evolving barcode data from the "barcode-of-barcodes" subclone files to build a seperate tree for each clone, using TreeUtils: https://github.com/mckennalab/TreeUtils, which itself uses Camin-Sokal maximum parsimony as implemented in PHYLIP Mix. All of the data files and code used in this section can be downloaded from the `TreeUtils` folder in Mendeley Data: XXX
+This step uses evolving barcode data from the "barcode-of-barcodes" subclone files to build a seperate tree for each clone, using TreeUtils: https://github.com/mckennalab/TreeUtils, which itself uses Camin-Sokal maximum parsimony as implemented in PHYLIP Mix. All of the data files and code used in this section can be downloaded from the `TreeUtils` folder in Mendeley Data: http://dx.doi.org/10.17632/t98pjcd7t6.1
 
 ### Inputs
 * The `TreeUtils/clone_hmids` directory containing `clone_XX_for_tree.txt` files 
@@ -106,17 +106,17 @@ This step uses evolving barcode data from the "barcode-of-barcodes" subclone fil
 ### Outputs
 * All outputs are stored in the `/TreeUtils/clone_trees` directory
 * Outputs include json: `clone_XX.json` and newick: `clone_XX.json.newick` files for each processed clone
-* Corresponding outputs from our study are available at: XXX
+* Corresponding outputs from our study are available at: http://dx.doi.org/10.17632/t98pjcd7t6.1
 
 
 
 ## Step 5: Build master edgelist & visualization
-This step consists of another R Notebook `make-edgelist.Rmd`, which takes all individual newick clone trees produced in the previous step and collates them into one master tree. This step also adds back cells from clones that did not have a corresponding phylogeny (e.g. due to chromosomal instability and barcode integrant duplication). These trees are merged and stored as an "edgelist". Edgelists can be easily converted to other useful data structures in R, such as a graph using the R package `igraph`. This can then be readily visualized as a circle packing plot (as in our paper) or different tree shapes using `ggraph`. A vignette on how to visualize an annotated example phylogeny from our metastasis data using `igraph` and `ggraph` is also included at the end of the R Notebook. All data files and code for this step are available through Mendeley Data: XXX.
+This step consists of another R Notebook `make-edgelist.Rmd`, which takes all individual newick clone trees produced in the previous step and collates them into one master tree. This step also adds back cells from clones that did not have a corresponding phylogeny (e.g. due to chromosomal instability and barcode integrant duplication). These trees are merged and stored as an "edgelist". Edgelists can be easily converted to other useful data structures in R, such as a graph using the R package `igraph`. This can then be readily visualized as a circle packing plot (as in our paper) or different tree shapes using `ggraph`. A vignette on how to visualize an annotated example phylogeny from our metastasis data using `igraph` and `ggraph` is also included at the end of the R Notebook. All data files and code for this step are available through Mendeley Data: http://dx.doi.org/10.17632/t98pjcd7t6.1.
 
 ### Inputs
 * The `/TreeUtils/clone_trees` directory containing `clone_XX_for_tree.txt` files
 * `final_classifications.txt` for clones which do not have corresponding phylogenies
-* Additionally, trees can be annotated with single-cell transcriptional information, example scRNA-seq cell metadata (from a Monocle 3 cds) from our metastasis datasets is available here: XXX, files named `cds_colData.txt`
+* Additionally, trees can be annotated with single-cell transcriptional information, example scRNA-seq cell metadata (from a Monocle 3 cds) from our metastasis datasets is available here: http://dx.doi.org/10.17632/t98pjcd7t6.1, files named `cds_colData.txt`
 
 ### Scripts
 * R Notebook: `make-edgelist.Rmd` performs all collation steps and includes a visualization vignette
@@ -125,7 +125,7 @@ This step consists of another R Notebook `make-edgelist.Rmd`, which takes all in
 ### Outputs
 * `full_edgelist.txt`
 * Example visualization can be viewed in: `make-edgelist.nb.html`
-* Corresponding outputs from our study are available at: XXX
+* Corresponding outputs from our study are available at: http://dx.doi.org/10.17632/t98pjcd7t6.1
 
 
 
